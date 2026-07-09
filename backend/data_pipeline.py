@@ -1,4 +1,8 @@
 """
+Responsibility: Prepare the data.
+"""
+
+"""
 Melbourne Parking — Data Pipeline
 ==================================
 Fetches all parking datasets from the City of Melbourne Open Data API
@@ -389,17 +393,18 @@ def get_static_tables(force_refresh: bool = False) -> dict[str, pd.DataFrame]:
 
 def get_full_dataset(force_sensor_refresh: bool = False) -> pd.DataFrame:
     """
-    Return sensors fully enriched with location, street name and restrictions.
+    Return ALL bays enriched with live occupancy, street name, and restrictions.
+
+    Starts from the bays table (29 k rows) so every physical bay is included,
+    regardless of whether it has a sensor. Sensor data is joined in where
+    available — bays without a sensor get is_occupied=None, has_sensor=False.
 
     Join chain:
-        sensors
-          └─(kerbsideid)──► bays          → precise lat/lng
-          └─(zone_number)─► zones         → street name
-                              └─(parkingzone)─► signs  → restriction summary
-          └─(zone_number)─► paystay flag  → has_paystay boolean
-
-    Coordinates: uses precise bay lat/lng when available,
-                 falls back to zone centroid otherwise.
+        bays (all 29 k rows — one row per coordinate point)
+          └─(kerbsideid)──────► sensors       → occupancy status + timestamps
+          └─(roadsegmentid)───► zones          → zone number + street name
+                                  └─(parkingzone)► signs   → restriction rules
+                                  └─(segment_id)► paystay  → has_paystay flag
     """
     sensors = get_sensors(force_refresh=force_sensor_refresh)
     static  = get_static_tables()
@@ -409,44 +414,25 @@ def get_full_dataset(force_sensor_refresh: bool = False) -> pd.DataFrame:
     signs   = static["signs"]
     paystay = static["paystay"]
 
-    # ── Step 1: sensors + precise bay coordinates via kerbsideid ────────────
-    # Only bays with a kerbsideid can be joined here (~5k of 29k rows).
-    # The remaining 24k bays still contribute via roadsegmentid in step 3
-    # (zone centroid), which fills in coordinates for sensors that miss here.
-    bays_coords = bays[bays["kerbsideid"].notna()][[
-        "kerbsideid", "roadsegmentid", "latitude", "longitude"
-    ]].rename(columns={"latitude": "bay_lat", "longitude": "bay_lon"})
-
-    full = sensors.merge(bays_coords, on="kerbsideid", how="left")
-
-    # ── Step 2: attach ALL restriction windows per zone ──────────────────────
-    # A zone can have multiple rows in signs (different day/time combinations).
-    # We keep the full signs table joined on zone_number so the recommendation
-    # engine can check every window at query time, not just the first one.
-    #
-    # Two things are added to `full`:
-    #   restriction_types — comma-separated list of all unique restriction codes
-    #                       e.g. "LZ30, MP2P"  (for display / quick filtering)
-    #   restrictions_json — all windows as a JSON string so the recommender can
-    #                       find the active rule for any arrival day + time
     import json
 
-    # Human-readable summary (all unique codes for this zone)
+    # ── Step 1: build restriction lookup per zone ────────────────────────────
+    # Human-readable summary of all unique restriction codes per zone
     restriction_summary = (
         signs.groupby("parkingzone")["restriction_display"]
         .apply(lambda x: ", ".join(sorted(x.dropna().unique())))
         .reset_index()
-        .rename(columns={"parkingzone": "zone_number",
+        .rename(columns={"parkingzone": "parkingzone",
                          "restriction_display": "restriction_types"})
     )
 
-    # Full windows as JSON — keeps every row, converted to serialisable types
+    # Full windows as JSON so the recommender can check any arrival time
     def _windows_to_json(group: pd.DataFrame) -> str:
         windows = []
         for _, row in group.iterrows():
             windows.append({
                 "days":    row.get("restriction_days"),
-                "start":   str(row.get("time_restrictions_start")),   # timedelta → str
+                "start":   str(row.get("time_restrictions_start")),
                 "finish":  str(row.get("time_restrictions_finish")),
                 "display": row.get("restriction_display"),
             })
@@ -456,55 +442,86 @@ def get_full_dataset(force_sensor_refresh: bool = False) -> pd.DataFrame:
         signs.groupby("parkingzone")
         .apply(_windows_to_json, include_groups=False)
         .reset_index()
-        .rename(columns={"parkingzone": "zone_number", 0: "restrictions_json"})
+        .rename(columns={0: "restrictions_json"})
+    )
+    restriction_lookup = restriction_summary.merge(
+        restriction_windows, on="parkingzone", how="left"
     )
 
-    restriction_summary = restriction_summary.merge(
-        restriction_windows, on="zone_number", how="left"
-    )
+    # ── Step 2: build zone lookup (zone number + street + restrictions) ───────
+    # zones maps roadsegmentid → parkingzone + street name.
+    # Merge restriction rules onto it.
+    zone_lookup = zones.merge(restriction_lookup, on="parkingzone", how="left")
 
-    # ── Step 3: zone centroid coordinates ───────────────────────────────────
-    bays_for_centroid = bays[["roadsegmentid", "latitude", "longitude"]].rename(
-        columns={"roadsegmentid": "segment_id"}
-    )
-    zones_with_coords = zones.merge(bays_for_centroid, on="segment_id", how="left")
-    zone_centroids = (
-        zones_with_coords.groupby("parkingzone")
-        .agg(
-            onstreet=("onstreet", "first"),
-            streetfrom=("streetfrom", "first"),
-            streetto=("streetto", "first"),
-            zone_lat=("latitude", "mean"),
-            zone_lon=("longitude", "mean"),
-        )
-        .reset_index()
-        .rename(columns={"parkingzone": "zone_number"})
-    )
-
-    # Merge zone context onto sensors
-    full = full.merge(zone_centroids, on="zone_number", how="left")
-    full = full.merge(restriction_summary, on="zone_number", how="left")
-    # ── Step 4: paystay flag ─────────────────────────────────────────────────
+    # ── Step 3: paystay flag per segment ─────────────────────────────────────
     paystay_segs = set(paystay["segment_id"].dropna().unique())
-    # Map via zones: zone_number → segment_id → paystay flag
-    zone_seg_map = zones[["parkingzone", "segment_id"]].rename(
-        columns={"parkingzone": "zone_number"}
+    zone_lookup["has_paystay"] = zone_lookup["segment_id"].isin(paystay_segs)
+
+    # Drop segment_id — it was only needed for the paystay flag
+    zone_lookup = zone_lookup.drop(columns=["segment_id"], errors="ignore")
+
+    # ── Step 4: start from bays, attach zone context via roadsegmentid ───────
+    # zones.segment_id = bays.roadsegmentid — rename for the join
+    zone_lookup = zone_lookup.rename(columns={"segment_id_x": "segment_id"}) \
+                             if "segment_id_x" in zone_lookup.columns \
+                             else zone_lookup
+    zone_for_join = zone_lookup.rename(columns={"segment_id": "roadsegmentid"}) \
+                   if "segment_id" in zone_lookup.columns \
+                   else zone_lookup.copy()
+
+    # zones.segment_id maps to bays.roadsegmentid
+    zone_with_seg = zones.merge(restriction_lookup, on="parkingzone", how="left")
+    zone_with_seg["has_paystay"] = zone_with_seg["segment_id"].isin(paystay_segs)
+
+    # One-row-per-segment zone lookup (drop duplicate zone rows per segment)
+    zone_by_seg = (
+        zone_with_seg
+        .sort_values("parkingzone")
+        .drop_duplicates(subset=["segment_id"])
+        .rename(columns={"segment_id": "roadsegmentid"})
     )
-    full = full.merge(zone_seg_map, on="zone_number", how="left")
-    full["has_paystay"] = full["segment_id"].isin(paystay_segs)
 
-    # ── Step 5: unified coordinates (precise > zone centroid) ────────────────
-    full["latitude"]  = full["bay_lat"].fillna(full["zone_lat"])
-    full["longitude"] = full["bay_lon"].fillna(full["zone_lon"])
+    full = bays.merge(zone_by_seg, on="roadsegmentid", how="left")
 
-    # Drop working columns that aren't useful downstream
-    full = full.drop(columns=["bay_lat", "bay_lon",
-                               "zone_lat", "zone_lon"], errors="ignore")
+    # ── Step 5: attach live sensor data via kerbsideid ───────────────────────
+    # Sensors use numeric kerbsideid; bays have string (some like "7568N").
+    # Only bays with a numeric-compatible kerbsideid will match sensors.
+    sensor_cols = [
+        "kerbsideid", "zone_number", "status_description",
+        "is_occupied", "lastupdated", "status_timestamp"
+    ]
+    sensors_slim = sensors[[c for c in sensor_cols if c in sensors.columns]].copy()
+    sensors_slim["kerbsideid"] = sensors_slim["kerbsideid"].astype(str)
+    full["kerbsideid"] = full["kerbsideid"].astype(str).where(
+        full["kerbsideid"].notna(), other=pd.NA
+    )
+
+    full = full.merge(sensors_slim, on="kerbsideid", how="left")
+
+    # ── Step 6: derived columns ───────────────────────────────────────────────
+    # has_sensor: True if this bay has a matching sensor reading
+    full["has_sensor"] = full["status_description"].notna()
+
+    # is_occupied: True/False for sensored bays, None for unsensored
+    full["is_occupied"] = full["is_occupied"].where(full["has_sensor"], other=None)
+
+    # Use parkingzone from zone lookup if zone_number from sensors is missing
+    if "parkingzone" in full.columns and "zone_number" in full.columns:
+        full["zone_number"] = full["zone_number"].fillna(full["parkingzone"])
+    elif "parkingzone" in full.columns:
+        full = full.rename(columns={"parkingzone": "zone_number"})
+
+    # Drop intermediate columns not needed downstream
+    full = full.drop(columns=["parkingzone", "lastupdated_y",
+                               "status_description"], errors="ignore")
+    if "lastupdated_x" in full.columns:
+        full = full.rename(columns={"lastupdated_x": "lastupdated"})
 
     log.info(
-        "Full dataset: %d sensor rows | coords coverage: %d/%d",
+        "Full dataset: %d bay rows | with sensor: %d | coords coverage: %d/%d",
         len(full),
-        full["latitude"].notna().sum(),
+        int(full["has_sensor"].sum()),
+        int(full["latitude"].notna().sum()),
         len(full),
     )
     return full.reset_index(drop=True)
