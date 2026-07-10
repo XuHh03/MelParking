@@ -132,30 +132,43 @@ def _fetch_dataframe(dataset_id: str) -> pd.DataFrame:
 
 def _fetch_sensors_json() -> pd.DataFrame:
     """
-    Fetch sensor data via the JSON API (faster for small, real-time datasets).
-    Falls back to CSV export if the JSON API fails.
+    Fetch sensor data via the CSV export endpoint — one request for all rows,
+    much faster than 34 paginated JSON calls at 100 rows each.
+    Falls back to paginated JSON if the CSV export fails.
     """
-    url = f"{BASE_URL}/{DATASETS['sensors']}/records"
-    records: list[dict] = []
-    offset = 0
-
-    while True:
-        params = {"limit": PAGE_SIZE, "offset": offset}
-        resp = requests.get(url, params=params, timeout=15)
+    url = f"{BASE_URL}/{DATASETS['sensors']}/exports/csv"
+    try:
+        resp = requests.get(
+            url,
+            params={"delimiter": ",", "limit": -1},
+            timeout=30,
+        )
         resp.raise_for_status()
 
-        data  = resp.json()
-        batch = data.get("results", [])
-        records.extend(batch)
+        import io
+        df = pd.read_csv(io.BytesIO(resp.content))
+        log.info(" Sensors: fetched %d records via CSV export", len(df))
+        return df
 
-        total   = data.get("total_count", 0)
-        offset += len(batch)
-        log.info("  sensors: fetched %d / %d records", offset, total)
+    except Exception as exc:
+        log.warning("Sensors CSV export failed (%s), falling back to JSON pagination", exc)
 
-        if offset >= total or not batch:
-            break
-
-    return pd.DataFrame(records) if records else pd.DataFrame()
+        # Fallback: paginated JSON
+        url_json = f"{BASE_URL}/{DATASETS['sensors']}/records"
+        records: list[dict] = []
+        offset = 0
+        while True:
+            r = requests.get(url_json, params={"limit": PAGE_SIZE, "offset": offset}, timeout=15)
+            r.raise_for_status()
+            data  = r.json()
+            batch = data.get("results", [])
+            records.extend(batch)
+            total   = data.get("total_count", 0)
+            offset += len(batch)
+            log.info("  sensors (fallback): fetched %d / %d", offset, total)
+            if offset >= total or not batch:
+                break
+        return pd.DataFrame(records) if records else pd.DataFrame()
 
 
 # ---------------------------------------------------------------------------
