@@ -57,7 +57,6 @@ import time
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 import requests
 import pandas as pd
@@ -407,10 +406,8 @@ def get_static_tables(force_refresh: bool = False) -> dict[str, pd.DataFrame]:
 def get_full_dataset(force_sensor_refresh: bool = False) -> pd.DataFrame:
     """
     Return ALL bays enriched with live occupancy, street name, and restrictions.
-
-    Starts from the bays table (29 k rows) so every physical bay is included,
-    regardless of whether it has a sensor. Sensor data is joined in where
-    available — bays without a sensor get is_occupied=None, has_sensor=False.
+    Sensor data is joined in where available — bays without a sensor 
+    get is_occupied=None, has_sensor=False.
 
     Join chain:
         bays (all 29 k rows — one row per coordinate point)
@@ -439,7 +436,7 @@ def get_full_dataset(force_sensor_refresh: bool = False) -> pd.DataFrame:
                          "restriction_display": "restriction_types"})
     )
 
-    # Full windows as JSON so the recommender can check any arrival time
+    # Full windows as JSON
     def _windows_to_json(group: pd.DataFrame) -> str:
         windows = []
         for _, row in group.iterrows():
