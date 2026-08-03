@@ -19,7 +19,6 @@ from api.health   import router as health_router
 from api.bays     import router as bays_router
 from api.geocode  import router as geocode_router
 from api.recommend import router as recommend_router
-from api.routing  import router as routing_router
 
 log = logging.getLogger(__name__)
 
@@ -72,4 +71,3 @@ app.include_router(health_router)
 app.include_router(bays_router)
 app.include_router(geocode_router)
 app.include_router(recommend_router)
-app.include_router(routing_router)
