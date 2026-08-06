@@ -1,5 +1,6 @@
 """
-Recommendation endpoint — full flow: address → nearby bays → ranked zones.
+Recommendation endpoint — full flow:
+    address → geocode → nearby bays → ranked zones → walking routes
 """
 
 from fastapi import APIRouter, HTTPException
@@ -8,12 +9,14 @@ from dependencies import get_df
 from models import (
     RecommendRequest,
     RecommendResponse,
+    RouteEmbed,
     ZoneResult,
     CoordinatePoint,
 )
 from services.geocode import geocode_or_raise, is_within_melbourne
 from services.search import get_nearby_bays
 from services.recommend import recommend_zones
+from services.routing import get_walking_route
 
 router = APIRouter(tags=["Recommend"])
 
@@ -85,6 +88,21 @@ def recommend(req: RecommendRequest):
         )
 
     # ── 4. Build response ─────────────────────────────────────────────────────
+    zone_results = []
+    for z in ranked:
+        route_result = get_walking_route(z["latitude"], z["longitude"], lat, lon)
+        route_embed  = (
+            RouteEmbed(
+                distance_m   = route_result.distance_m,
+                duration_s   = route_result.duration_s,
+                duration_min = route_result.duration_min,
+                polyline     = route_result.polyline,
+            )
+            if route_result is not None
+            else None
+        )
+        zone_results.append(ZoneResult(**z, route=route_embed))
+
     return RecommendResponse(
         destination       = CoordinatePoint(lat=lat, lon=lon),
         resolved_address  = resolved_address,
@@ -92,5 +110,5 @@ def recommend(req: RecommendRequest):
         radius_m          = req.radius_m,
         total_bays_found  = total_found,
         total_zones_found = len(ranked),
-        results           = [ZoneResult(**z) for z in ranked],
+        results           = zone_results,
     )
