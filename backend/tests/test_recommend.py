@@ -88,7 +88,7 @@ print("\n── score_zone ─────────────────�
 # Ideal zone: close, all free, no restriction
 s_ideal = score_zone(
     distance_m=50, free_bays=5, occupied_bays=0, unknown_bays=0,
-    has_paystay=False, restriction_active=False, max_distance_m=500,
+    has_paystay=False, restriction_active=False, off_limits=False, max_distance_m=500,
 )
 check("Close + all free + no restriction → high score",
       s_ideal >= 0.8, f"{s_ideal:.3f}")
@@ -96,23 +96,31 @@ check("Close + all free + no restriction → high score",
 # Full zone at same distance
 s_full = score_zone(
     distance_m=50, free_bays=0, occupied_bays=5, unknown_bays=0,
-    has_paystay=False, restriction_active=False, max_distance_m=500,
+    has_paystay=False, restriction_active=False, off_limits=False, max_distance_m=500,
 )
 check("Close + all occupied → lower than all-free",
       s_full < s_ideal, f"{s_full:.3f} < {s_ideal:.3f}")
 
-# Restriction penalty
+# Metered restriction (MP2P) — minimal penalty
 s_restr = score_zone(
     distance_m=50, free_bays=5, occupied_bays=0, unknown_bays=0,
-    has_paystay=False, restriction_active=True, max_distance_m=500,
+    has_paystay=False, restriction_active=True, off_limits=False, max_distance_m=500,
 )
-check("Active restriction → lower than same zone unrestricted",
+check("Metered restriction (MP2P) → slightly lower than unrestricted",
       s_restr < s_ideal, f"{s_restr:.3f} < {s_ideal:.3f}")
+
+# Loading zone (off limits) — heavy penalty
+s_lz = score_zone(
+    distance_m=50, free_bays=5, occupied_bays=0, unknown_bays=0,
+    has_paystay=False, restriction_active=True, off_limits=True, max_distance_m=500,
+)
+check("Loading zone → much lower than metered",
+      s_lz < s_restr, f"{s_lz:.3f} < {s_restr:.3f}")
 
 # Paystay bonus
 s_pay = score_zone(
     distance_m=50, free_bays=5, occupied_bays=0, unknown_bays=0,
-    has_paystay=True, restriction_active=False, max_distance_m=500,
+    has_paystay=True, restriction_active=False, off_limits=False, max_distance_m=500,
 )
 check("Paystay bonus → higher than same zone without",
       s_pay >= s_ideal, f"{s_pay:.3f}")
@@ -120,16 +128,16 @@ check("Paystay bonus → higher than same zone without",
 # No sensor data → neutral occupancy (not penalised)
 s_unknown = score_zone(
     distance_m=50, free_bays=0, occupied_bays=0, unknown_bays=5,
-    has_paystay=False, restriction_active=False, max_distance_m=500,
+    has_paystay=False, restriction_active=False, off_limits=False, max_distance_m=500,
 )
 check("No sensors → score between full and free zones",
       s_full < s_unknown < s_ideal, f"{s_full:.3f} < {s_unknown:.3f} < {s_ideal:.3f}")
 
 # Score always clamped to [0, 1]
 for label, kwargs in [
-    ("at origin",   dict(distance_m=0,   free_bays=10, occupied_bays=0,  unknown_bays=0,  has_paystay=True,  restriction_active=False, max_distance_m=500)),
-    ("at limit",    dict(distance_m=499, free_bays=0,  occupied_bays=10, unknown_bays=0,  has_paystay=False, restriction_active=True,  max_distance_m=500)),
-    ("all unknown", dict(distance_m=250, free_bays=0,  occupied_bays=0,  unknown_bays=10, has_paystay=False, restriction_active=False, max_distance_m=500)),
+    ("at origin",   dict(distance_m=0,   free_bays=10, occupied_bays=0,  unknown_bays=0,  has_paystay=True,  restriction_active=False, off_limits=False, max_distance_m=500)),
+    ("at limit",    dict(distance_m=499, free_bays=0,  occupied_bays=10, unknown_bays=0,  has_paystay=False, restriction_active=True,  off_limits=False, max_distance_m=500)),
+    ("all unknown", dict(distance_m=250, free_bays=0,  occupied_bays=0,  unknown_bays=10, has_paystay=False, restriction_active=False, off_limits=False, max_distance_m=500)),
 ]:
     s = score_zone(**kwargs)
     check(f"score in [0,1] — {label}", 0.0 <= s <= 1.0, f"{s:.3f}")
