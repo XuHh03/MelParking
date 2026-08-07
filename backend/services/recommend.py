@@ -122,7 +122,30 @@ def get_active_restriction(restrictions_json: str, arrival_dt: datetime) -> Opti
 
 
 # ---------------------------------------------------------------------------
-# Null-safe converters
+# Restriction classification
+# ---------------------------------------------------------------------------
+_NO_PARK_CODES = {
+    "LZ30",
+    "DP2P",
+    "PP",
+    "SP",
+}
+
+def _is_off_limits(restriction_types: str | None, active_restriction: str | None) -> bool:
+    """
+    Return True only if the active restriction means a regular driver
+    cannot legally park here (loading zone, disabled bay, etc.).
+
+    Metered/timed parking is NOT off-limits —
+    the driver just needs to pay or observe the time limit.
+    """
+    for code in (active_restriction, restriction_types):
+        if not code:
+            continue
+        for part in code.upper().replace(',', ' ').split():
+            if part in _NO_PARK_CODES:
+                return True
+    return False
 # ---------------------------------------------------------------------------
 
 def _str(val) -> Optional[str]:
@@ -164,49 +187,45 @@ def score_zone(
     unknown_bays: int,
     has_paystay: bool,
     restriction_active: bool,
+    off_limits: bool,
     max_distance_m: float,
-    distance_weight: float = 0.6,
-    occupancy_weight: float = 0.4,
+    distance_weight: float = 0.7,
+    occupancy_weight: float = 0.3,
 ) -> float:
     """
     Return a composite score 0.0–1.0 for a parking zone.
 
     distance_score
-        1 - (distance_m / max_distance_m)
-        The distance to the nearest bay in the zone.
-        Closer = higher score.
+        1 - (distance_m / max_distance_m). Closer = higher.
 
     occupancy_score
-        Based on the proportion of bays that are free among
-        those with sensor data.
-        - All free  → 1.0
-        - All occupied → 0.0
-        - No sensors at all → 0.5 (unknown, neither penalised nor rewarded)
-        - Mix of known + unknown → weighted average
+        Fraction of sensored bays that are free.
+        No sensor data → 0.5 (neutral, not penalised).
 
-    restriction_penalty  -0.3 if a restriction is active at arrival time
-    paystay_bonus        +0.05 if pay-and-stay is available
+    off_limits_penalty  -0.4  loading zone, disabled bay, no standing — can't park
+    timed_nudge         -0.05 metered/timed parking (MP2P, 1P etc.) — still parkable
+    paystay_bonus       +0.05 pay-and-stay available
     """
     distance_score = max(0.0, min(1.0, 1.0 - distance_m / max_distance_m))
 
     sensored = free_bays + occupied_bays
     if sensored == 0:
-        # No sensor data at all — neutral score
         occupancy_score = 0.5
     else:
-        # Fraction of sensored bays that are free
         known_score = free_bays / sensored
         if unknown_bays == 0:
             occupancy_score = known_score
         else:
-            # Blend known score with 0.5 for unknown bays
             total = sensored + unknown_bays
             occupancy_score = (known_score * sensored + 0.5 * unknown_bays) / total
 
     score = distance_weight * distance_score + occupancy_weight * occupancy_score
 
-    if restriction_active:
-        score -= 0.3
+    if off_limits:
+        score -= 0.4
+    elif restriction_active:
+        score -= 0.05
+
     if has_paystay:
         score += 0.05
 
@@ -222,8 +241,8 @@ def recommend_zones(
     arrival_dt: datetime,
     max_distance_m: float = 500.0,
     top_n: int = 10,
-    distance_weight: float = 0.6,
-    occupancy_weight: float = 0.4,
+    distance_weight: float = 0.7,
+    occupancy_weight: float = 0.3,
     include_full: bool = True,
 ) -> list[dict]:
     """
@@ -235,8 +254,8 @@ def recommend_zones(
     arrival_dt      : when the user plans to arrive
     max_distance_m  : normalisation factor for distance scoring
     top_n           : number of zones to return
-    distance_weight : scoring weight for distance (default 0.6)
-    occupancy_weight: scoring weight for occupancy (default 0.4)
+    distance_weight : scoring weight for distance (default 0.7)
+    occupancy_weight: scoring weight for occupancy (default 0.3)
     include_full    : if False, exclude zones where all sensored bays are occupied
 
     Returns
@@ -310,6 +329,7 @@ def recommend_zones(
         restriction_types = _str(first.get("restriction_types"))
         restriction_active = not is_parking_allowed(restrictions_json, arrival_dt)
         active_restriction = get_active_restriction(restrictions_json, arrival_dt)
+        off_limits         = _is_off_limits(restriction_types, active_restriction)
 
         # ── Pay-and-stay ───────────────────────────────────────────────────
         has_paystay = bool(group["has_paystay"].any())
@@ -326,6 +346,7 @@ def recommend_zones(
             unknown_bays       = unknown_bays,
             has_paystay        = has_paystay,
             restriction_active = restriction_active,
+            off_limits         = off_limits,
             max_distance_m     = max_distance_m,
             distance_weight    = distance_weight,
             occupancy_weight   = occupancy_weight,
