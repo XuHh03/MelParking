@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+/* Leaflet CSS — must be imported globally */
+@import "leaflet/dist/leaflet.css";
+
+/* Full-height app */
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Fix Leaflet marker icons broken by Vite's asset hashing */
+.leaflet-default-icon-path {
+  background-image: url("leaflet/dist/images/marker-icon.png");
+}
